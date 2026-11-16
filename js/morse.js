@@ -271,20 +271,60 @@ export function ditDahThresholdMs(wpm) {
   return Math.max(180, 2 * unitMs(wpm));
 }
 
-export function classifyPress(durationMs, wpm) {
+export function classifyPress(durationMs, wpm, thresholdMs) {
   const d = Number(durationMs);
   if (!Number.isFinite(d) || d <= 0) return null;
-  return d < ditDahThresholdMs(wpm) ? "." : "-";
+  const explicit = Number(thresholdMs);
+  const thr = Number.isFinite(explicit) && explicit > 0 ? explicit : ditDahThresholdMs(wpm);
+  return d < thr ? "." : "-";
 }
 
 /** Convert an array of hold durations (ms) into a Morse string. */
-export function decodePresses(durationsMs, wpm) {
+export function decodePresses(durationsMs, wpm, thresholdMs) {
   const marks = [];
   for (const d of durationsMs) {
-    const mark = classifyPress(d, wpm);
+    const mark = classifyPress(d, wpm, thresholdMs);
     if (mark) marks.push(mark);
   }
   return marks.join("");
+}
+
+/**
+ * Dit/Dah threshold for the send key. Starts from the send-tempo WPM
+ * (with a comfortable floor for glass screens) and, once enough of the
+ * user's own dits and dahs were recorded, uses the midpoint of those averages.
+ */
+export function sendThresholdMs(wpm, tapStats = {}, { floor = 200 } = {}) {
+  const dit = Number(tapStats.ditMs) || 0;
+  const dah = Number(tapStats.dahMs) || 0;
+  const n = Math.min(tapStats.ditN || 0, tapStats.dahN || 0);
+  if (n >= 3 && dit > 0 && dah > dit) {
+    return Math.max(floor, (dit + dah) / 2);
+  }
+  return Math.max(floor, ditDahThresholdMs(wpm));
+}
+
+/** Running-mean update from confirmed dit/dah durations. */
+export function updateTapAverages(stats, durations, marks) {
+  const next = {
+    ditMs: Number(stats && stats.ditMs) || 0,
+    dahMs: Number(stats && stats.dahMs) || 0,
+    ditN: Number(stats && stats.ditN) || 0,
+    dahN: Number(stats && stats.dahN) || 0,
+  };
+  (durations || []).forEach((raw, i) => {
+    const d = Number(raw);
+    const mark = marks && marks[i];
+    if (!mark || !Number.isFinite(d) || d <= 0) return;
+    if (mark === ".") {
+      next.ditN += 1;
+      next.ditMs += (d - next.ditMs) / next.ditN;
+    } else if (mark === "-") {
+      next.dahN += 1;
+      next.dahMs += (d - next.dahMs) / next.dahN;
+    }
+  });
+  return next;
 }
 
 export function codesMatch(a, b) {
@@ -441,4 +481,81 @@ export function accuracy(history, windowSize = 20) {
 export function kochReady(history, { windowSize = 20, minN = 15, threshold = 0.9 } = {}) {
   const { n, pct } = accuracy(history, windowSize);
   return n >= minN && pct >= threshold;
+}
+
+export function prettyCode(code) {
+  return [...String(code || "")].map((c) => (c === "." ? "·" : c === "-" ? "–" : c)).join(" ");
+}
+
+/** Side-by-side comparison, e.g. "K – · –  ≠  M – –". */
+export function formatCompare(chosen, correct) {
+  const leftCh = normalizeChar(chosen);
+  const rightCh = normalizeChar(correct);
+  const left = (leftCh ? leftCh + " " : "") + prettyCode(codeFor(leftCh) || "");
+  const right = (rightCh ? rightCh + " " : "") + prettyCode(codeFor(rightCh) || "");
+  if (!leftCh || leftCh === rightCh) return right.trim();
+  return left.trim() + "  ≠  " + right.trim();
+}
+
+export const XP_PER_LEVEL = 120;
+
+export function levelOf(xp) {
+  return Math.floor(Math.max(0, Number(xp) || 0) / XP_PER_LEVEL) + 1;
+}
+
+export function xpToNextLevel(xp) {
+  const level = levelOf(xp);
+  return level * XP_PER_LEVEL - Math.max(0, Number(xp) || 0);
+}
+
+/** Smallest Koch prefix that yields at least `minWords` practice words. */
+export function minUnlockForWords(minWords = 3) {
+  for (let n = 2; n <= KOCH_ORDER.length; n++) {
+    if (wordsForUnlocked(KOCH_ORDER.slice(0, n)).length >= minWords) return n;
+  }
+  return KOCH_ORDER.length;
+}
+
+/** Short Morse greetings for the daily-goal reward. ET always fits the start set. */
+export const GREETINGS = [
+  { text: "ET", hint: "Dit und Dah" },
+  { text: "HI", hint: "Funk-Gruß" },
+  { text: "OK", hint: "Alles klar" },
+  { text: "GUT", hint: "Gut gemacht" },
+  { text: "73", hint: "Beste Grüße" },
+];
+
+export function pickGreeting(unlocked, rng = Math.random) {
+  const set = new Set(unlocked);
+  const pool = GREETINGS.filter((g) => [...g.text].every((ch) => set.has(ch)));
+  const usable = pool.length ? pool : [GREETINGS[0]];
+  const bestLen = Math.max(...usable.map((g) => g.text.length));
+  const rich = usable.filter((g) => g.text.length === bestLen);
+  const i = Math.floor((typeof rng === "function" ? rng() : 0) * rich.length) % rich.length;
+  return rich[i];
+}
+
+/**
+ * Weakest character among `pool` according to letterStats.
+ * Prefers letters with at least one failure; otherwise the lowest accuracy.
+ */
+export function weakestChar(letterStats = {}, pool = []) {
+  let best = null;
+  let bestScore = Infinity;
+  for (const ch of pool) {
+    const st = letterStats[ch];
+    if (!st) continue;
+    const ok = st.ok || 0;
+    const fail = st.fail || 0;
+    const total = ok + fail;
+    if (!total) continue;
+    const acc = ok / total;
+    // Failures weigh more; few samples with a fail still count.
+    const score = acc - (fail > 0 ? 0.05 : 0);
+    if (score < bestScore) {
+      bestScore = score;
+      best = ch;
+    }
+  }
+  return best;
 }

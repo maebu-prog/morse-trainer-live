@@ -2,7 +2,7 @@
 <html lang="de">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <meta name="theme-color" content="#070b14" />
   <meta name="color-scheme" content="dark" />
   <meta name="description" content="Morse Trainer – Morsecode hören, selbst geben und fühlen. Sofort loslegen, ohne Anmeldung." />
@@ -26,6 +26,7 @@
       </div>
       <h1>Morse Trainer</h1>
       <p>Hören, selbst morsen und auf dem Handy fühlen. Tippe, damit Ton und Vibration laufen dürfen.</p>
+      <p class="gate-tip">Stummschalter aus, Medienlautstärke hoch.</p>
       <button type="button" class="btn btn-primary" id="btn-enter">Los geht’s</button>
     </div>
   </div>
@@ -39,18 +40,16 @@
           <button type="button" class="btn-icon" id="btn-settings" aria-label="Einstellungen">⚙</button>
         </div>
         <h1>Morse Trainer</h1>
-        <p class="lead">Koch-Methode: erst zwei Zeichen, bei 90&nbsp;% kommt das nächste dazu.</p>
+        <p class="lead">Erst zwei Zeichen, bei 90&nbsp;% kommt das nächste dazu.</p>
+        <details class="koch-info">
+          <summary>Was ist die Koch-Methode?</summary>
+          <p>Du lernst erst zwei Zeichen sicher. Erst wenn du sie zuverlässig erkennst, kommt das nächste dazu – nicht das ganze Alphabet auf einmal.</p>
+        </details>
       </header>
 
+      <p class="xp-line" id="xp-line"></p>
+
       <div class="hud">
-        <div class="stat">
-          <span class="stat-num" id="stat-level">1</span>
-          <span class="stat-label" id="stat-rank">Horcher</span>
-        </div>
-        <div class="stat">
-          <span class="stat-num" id="stat-xp">0</span>
-          <span class="stat-label">XP</span>
-        </div>
         <div class="stat">
           <span class="stat-num" id="stat-streak">0</span>
           <span class="stat-label">Serie</span>
@@ -69,35 +68,43 @@
         <div class="bar"><div class="bar-fill" id="daily-fill"></div></div>
       </div>
 
-      <div class="unlock-chip hidden" id="next-hint"></div>
+      <div class="unlock-box" id="next-hint">
+        <div class="unlock-row">
+          <span id="unlock-label">Nächstes Zeichen</span>
+          <span id="unlock-text"></span>
+        </div>
+        <div class="bar"><div class="bar-fill" id="unlock-fill"></div></div>
+      </div>
+
+      <button type="button" class="btn btn-primary btn-continue" id="btn-continue">Weiter üben</button>
 
       <nav class="modes" aria-label="Übungsarten">
-        <button type="button" class="mode-card" data-mode="listen">
+        <button type="button" class="mode-card" data-mode="listen" id="mode-listen">
           <span class="mode-ico" aria-hidden="true">🎧</span>
           <span class="mode-title">Hören</span>
           <span class="mode-sub">Ton → Buchstabe</span>
         </button>
-        <button type="button" class="mode-card" data-mode="send">
+        <button type="button" class="mode-card" data-mode="send" id="mode-send">
           <span class="mode-ico" aria-hidden="true">☝️</span>
           <span class="mode-title">Morsen</span>
           <span class="mode-sub">Buchstabe → Taste</span>
         </button>
-        <button type="button" class="mode-card" data-mode="vibe">
+        <button type="button" class="mode-card" data-mode="vibe" id="mode-vibe">
           <span class="mode-ico" aria-hidden="true">📳</span>
           <span class="mode-title">Fühlen</span>
-          <span class="mode-sub">Vibration → raten</span>
+          <span class="mode-sub" id="vibe-sub">Vibration → raten</span>
         </button>
         <button type="button" class="mode-card" data-mode="words" id="mode-words">
           <span class="mode-ico" aria-hidden="true">💬</span>
           <span class="mode-title">Wörter</span>
           <span class="mode-sub" id="words-sub">Kurze deutsche Wörter</span>
         </button>
-        <button type="button" class="mode-card mode-wide" data-mode="blitz">
+        <button type="button" class="mode-card" data-mode="blitz" id="mode-blitz">
           <span class="mode-ico" aria-hidden="true">⚡</span>
           <span class="mode-title">Blitz</span>
-          <span class="mode-sub">60 Sekunden, so viele wie möglich</span>
+          <span class="mode-sub" id="blitz-sub">60 Sekunden, so viele wie möglich</span>
         </button>
-        <button type="button" class="mode-card mode-wide" data-mode="cards">
+        <button type="button" class="mode-card" data-mode="cards" id="mode-cards">
           <span class="mode-ico" aria-hidden="true">🗂</span>
           <span class="mode-title">Lernkarten</span>
           <span class="mode-sub">Alphabet, Zahlen, Satzzeichen</span>
@@ -122,10 +129,12 @@
         <div class="lamp" id="lamp" aria-hidden="true"></div>
         <button type="button" class="btn btn-play" id="btn-play">Abspielen</button>
         <p class="pattern" id="quiz-pattern" hidden></p>
+        <p class="compare" id="quiz-compare" hidden></p>
         <p class="feedback" id="quiz-feedback" role="status"></p>
       </div>
 
       <div class="choice-grid" id="choice-grid"></div>
+      <button type="button" class="btn btn-primary hidden" id="btn-quiz-next">Weiter</button>
     </section>
 
     <!-- SEND -->
@@ -150,12 +159,18 @@
         <span class="key-hint" id="key-hint">kurz = Dit, lang = Dah</span>
       </button>
 
-      <div class="key-alts">
+      <div class="key-alts hidden" id="send-simple">
         <button type="button" class="btn btn-ghost" id="btn-dit" aria-label="Dit">• Dit</button>
         <button type="button" class="btn btn-ghost" id="btn-dah" aria-label="Dah">– Dah</button>
-        <button type="button" class="btn btn-ghost" id="btn-clear">Löschen</button>
-        <button type="button" class="btn btn-primary" id="btn-send-ok">Fertig</button>
       </div>
+      <div class="key-alts" id="send-basic">
+        <button type="button" class="btn btn-ghost" id="btn-clear">Löschen</button>
+        <button type="button" class="btn btn-primary hidden" id="btn-send-ok">Fertig</button>
+      </div>
+      <label class="easy-toggle">
+        <input type="checkbox" id="set-easy-send" />
+        <span>Einfach-Modus <small>Dit- und Dah-Tasten statt nur der großen Taste</small></span>
+      </label>
     </section>
 
     <!-- WORDS -->
@@ -198,6 +213,7 @@
         <div class="prompt-stage">
           <div class="lamp" id="blitz-lamp" aria-hidden="true"></div>
           <button type="button" class="btn btn-play" id="btn-play-blitz">Abspielen</button>
+          <p class="compare" id="blitz-compare" hidden></p>
           <p class="feedback" id="blitz-feedback" role="status"></p>
         </div>
         <div class="choice-grid" id="blitz-grid"></div>
@@ -212,6 +228,8 @@
       <div id="blitz-end" class="blitz-panel hidden">
         <p class="blitz-final" id="blitz-final">0</p>
         <p id="blitz-end-msg">Zeit um!</p>
+        <p class="blitz-delta" id="blitz-delta"></p>
+        <p class="blitz-weak" id="blitz-weak"></p>
         <button type="button" class="btn btn-primary" id="btn-blitz-again">Noch einmal</button>
         <button type="button" class="btn btn-ghost" data-go="home">Zur Startseite</button>
       </div>
@@ -223,7 +241,7 @@
         <button type="button" class="btn-icon back" data-go="home" aria-label="Zurück">←</button>
         <div class="topbar-mid">
           <h2>Lernkarten</h2>
-          <p class="topbar-sub">ITU-Morse, mit Merkwort wo üblich</p>
+          <p class="topbar-sub">Dein Sammelalbum – offene Zeichen leuchten</p>
         </div>
       </header>
 
@@ -250,12 +268,18 @@
 
       <form class="settings" id="settings-form">
         <label class="setting">
-          <span>Geschwindigkeit <strong id="val-wpm">15</strong> WPM</span>
+          <span>Tempo (Wörter/Min) <strong id="val-wpm">15</strong></span>
           <input type="range" id="set-wpm" min="10" max="25" step="1" value="15" />
         </label>
 
+        <label class="setting">
+          <span>Morsen-Tempo (Wörter/Min) <strong id="val-send-wpm">10</strong></span>
+          <input type="range" id="set-send-wpm" min="6" max="16" step="1" value="10" />
+          <small class="setting-hint">Eigene, langsamere Schwelle für die Taste. Sie passt sich außerdem an deine Tippdauer an.</small>
+        </label>
+
         <label class="setting toggle">
-          <span>Farnsworth-Abstand <small>Zeichen schnell, Pausen etwas länger – angenehmer zum Lernen</small></span>
+          <span>Längere Pausen zwischen Zeichen <small>Zeichen bleiben flott, nur die Pausen dazwischen werden länger – angenehmer zum Lernen</small></span>
           <input type="checkbox" id="set-farnsworth" checked />
         </label>
 
@@ -289,8 +313,17 @@
   <div id="modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="modal-title">
     <div class="modal-card">
       <h3 id="modal-title"></h3>
-      <p id="modal-body"></p>
+      <div id="modal-body"></div>
       <button type="button" class="btn btn-primary" id="modal-ok">Weiter</button>
+    </div>
+  </div>
+
+  <div id="lesson" class="lesson hidden" role="dialog" aria-modal="true" aria-labelledby="lesson-title">
+    <div class="lesson-panel">
+      <h2 id="lesson-title">Deine ersten Zeichen</h2>
+      <p id="lesson-lead">Tippe auf eine Karte, um den Ton zu hören.</p>
+      <div id="lesson-cards" class="lesson-cards"></div>
+      <button type="button" class="btn btn-primary" id="lesson-go">Jetzt hören</button>
     </div>
   </div>
 

@@ -1,5 +1,4 @@
 import {
-  MORSE,
   KOCH_ORDER,
   LETTERS,
   DIGITS,
@@ -10,7 +9,8 @@ import {
   displayName,
   codesMatch,
   classifyPress,
-  ditDahThresholdMs,
+  sendThresholdMs,
+  updateTapAverages,
   timelineFor,
   vibratePattern,
   pickChar,
@@ -19,6 +19,13 @@ import {
   accuracy,
   kochReady,
   randomItem,
+  prettyCode,
+  formatCompare,
+  levelOf,
+  xpToNextLevel,
+  minUnlockForWords,
+  pickGreeting,
+  weakestChar,
 } from "./morse.js";
 import {
   unlockAudio,
@@ -45,6 +52,9 @@ const RANKS = [
 const DAILY_GOAL = 20;
 const HISTORY_WINDOW = 20;
 const MIN_KOCH = 15;
+const WORDS_MIN = 3;
+const BLITZ_MIN_CHARS = 6;
+const VIBE_MIN_CHARS = 4;
 
 const DEFAULTS = {
   unlocked: 2,
@@ -54,14 +64,19 @@ const DEFAULTS = {
   dailyCorrect: 0,
   dailyDate: null,
   bestBlitz: 0,
+  introSeen: false,
+  introduced: [],
+  tapStats: { ditMs: 0, dahMs: 0, ditN: 0, dahN: 0 },
   settings: {
     wpm: 15,
+    sendWpm: 10,
     farnsworth: true,
     charWpm: 18,
     pitch: 600,
     volume: 0.7,
     vibration: true,
     sfx: true,
+    easySend: false,
   },
   history: [],
   letterStats: {},
@@ -75,6 +90,12 @@ let send = null;
 let words = null;
 let blitz = null;
 let autoTimer = null;
+let playGen = 0;
+let pendingAdvance = null;
+const noticeQueue = [];
+let overlayBusy = false;
+let lessonOnDone = null;
+let modalOnDismiss = null;
 
 const $ = (id) => document.getElementById(id);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
@@ -90,18 +111,49 @@ function yesterdayISO() {
   return d.toISOString().slice(0, 10);
 }
 
+function hasDeviceVibrate() {
+  return typeof navigator.vibrate === "function";
+}
+
+function isStandalone() {
+  return (
+    window.matchMedia("(display-mode: standalone)").matches ||
+    window.navigator.standalone === true
+  );
+}
+
+function isAppleTouch() {
+  return /iP(hone|ad|od)/.test(navigator.userAgent) ||
+    (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+}
+
 function loadState() {
   try {
     const raw = localStorage.getItem(STORE_KEY);
     if (!raw) return structuredClone(DEFAULTS);
     const data = JSON.parse(raw);
-    return {
+    const merged = {
       ...structuredClone(DEFAULTS),
       ...data,
       settings: { ...structuredClone(DEFAULTS.settings), ...(data.settings || {}) },
       history: Array.isArray(data.history) ? data.history : [],
       letterStats: data.letterStats || {},
+      tapStats: { ...structuredClone(DEFAULTS.tapStats), ...(data.tapStats || {}) },
     };
+    // Existing progress from before this update: treat already-unlocked
+    // characters as introduced, skip the first-start lesson.
+    if (data.introSeen == null && data.introduced == null) {
+      const returning = (data.xp || 0) > 0 || (data.unlocked || 0) > 2 ||
+        (Array.isArray(data.history) && data.history.length > 0) || !!data.lastPlayDate;
+      if (returning) {
+        merged.introSeen = true;
+        merged.introduced = KOCH_ORDER.slice(0, Math.max(2, merged.unlocked));
+      } else {
+        merged.introSeen = false;
+        merged.introduced = [];
+      }
+    }
+    return merged;
   } catch {
     return structuredClone(DEFAULTS);
   }
@@ -113,10 +165,6 @@ function saveState() {
 
 function unlockedChars() {
   return KOCH_ORDER.slice(0, Math.max(2, Math.min(state.unlocked, KOCH_ORDER.length)));
-}
-
-function levelOf(xp) {
-  return Math.floor(xp / 120) + 1;
 }
 
 function rankOf(level) {
@@ -134,8 +182,12 @@ function settingsAudio() {
   };
 }
 
+function currentSendThreshold() {
+  return sendThresholdMs(state.settings.sendWpm || 10, state.tapStats);
+}
+
 function canVibrate() {
-  return !!(state.settings.vibration && navigator.vibrate);
+  return !!(state.settings.vibration && hasDeviceVibrate());
 }
 
 function buzz(pattern) {
@@ -182,7 +234,11 @@ function addXp(amount) {
   if (after > before) {
     cue("level");
     confettiBurst(80);
-    showModal("Level " + after + "!", "Neuer Rang: " + rankOf(after) + ".");
+    enqueueNotice({
+      type: "level",
+      title: "Level " + after + "!",
+      body: "Neuer Rang: " + rankOf(after) + ".",
+    });
   }
 }
 
@@ -205,7 +261,7 @@ function recordAnswer(ch, ok, { xp = 10, skipUnlock = false } = {}) {
       gained += 50;
       cue("level");
       confettiBurst(70);
-      toast("Tagesziel geschafft! +50 XP");
+      enqueueNotice({ type: "daily" });
     }
     addXp(gained);
     if (!skipUnlock) maybeUnlock();
@@ -225,14 +281,7 @@ function maybeUnlock() {
   saveState();
   cue("level");
   confettiBurst(90);
-  const title = "Neues Zeichen: " + ch;
-  const code = prettyCode(codeFor(ch));
-  const hint = mnemonicFor(ch);
-  showModal(title, "Morse: " + code + (hint ? " · Merkwort: " + hint : "") + ". Ab jetzt ist es mit im Mix.");
-}
-
-function prettyCode(code) {
-  return [...(code || "")].map((c) => (c === "." ? "·" : "–")).join(" ");
+  enqueueNotice({ type: "new-char", ch });
 }
 
 function accText() {
@@ -241,12 +290,196 @@ function accText() {
   return ok + "/" + n + " richtig (" + Math.round(pct * 100) + " %)";
 }
 
+function overlayOpen() {
+  return overlayBusy || !$("modal").classList.contains("hidden") || !$("lesson").classList.contains("hidden");
+}
+
+function haltMedia() {
+  playGen += 1;
+  stopPlayback();
+  stopSidetone();
+  $$(".lamp").forEach((el) => el.classList.remove("on"));
+}
+
+function scheduleAdvance(fn, delay) {
+  clearTimeout(autoTimer);
+  pendingAdvance = fn;
+  if (overlayOpen() || noticeQueue.length) return;
+  autoTimer = setTimeout(() => {
+    if (overlayOpen()) return;
+    pendingAdvance = null;
+    fn();
+  }, delay);
+}
+
+function clearAdvance() {
+  clearTimeout(autoTimer);
+  autoTimer = null;
+  pendingAdvance = null;
+}
+
+function flushAdvance() {
+  if (overlayOpen() || noticeQueue.length) return;
+  const fn = pendingAdvance;
+  if (!fn) return;
+  pendingAdvance = null;
+  clearTimeout(autoTimer);
+  autoTimer = setTimeout(() => {
+    if (overlayOpen()) return;
+    fn();
+  }, 280);
+}
+
+const NOTICE_PRIORITY = { "new-char": 0, level: 1, daily: 2 };
+
+function enqueueNotice(notice) {
+  noticeQueue.push(notice);
+  noticeQueue.sort((a, b) => (NOTICE_PRIORITY[a.type] ?? 9) - (NOTICE_PRIORITY[b.type] ?? 9));
+  queueMicrotask(pumpNotices);
+}
+
+function pumpNotices() {
+  if (overlayBusy) return;
+  noticeQueue.sort((a, b) => (NOTICE_PRIORITY[a.type] ?? 9) - (NOTICE_PRIORITY[b.type] ?? 9));
+  const next = noticeQueue.shift();
+  if (!next) {
+    flushAdvance();
+    return;
+  }
+  if (next.type === "new-char") {
+    openLesson({
+      chars: [next.ch],
+      title: "Neues Zeichen: " + next.ch,
+      lead: "Tippe auf die Karte, um den Ton zu hören. Ab jetzt ist es mit im Mix.",
+      button: "Weiter",
+    });
+    return;
+  }
+  if (next.type === "daily") {
+    showDailyReward();
+    return;
+  }
+  showModal({ title: next.title, body: next.body });
+}
+
+function closeOverlays() {
+  $("modal").classList.add("hidden");
+  $("modal-body").innerHTML = "";
+  modalOnDismiss = null;
+  if (!$("lesson").classList.contains("hidden")) {
+    $("lesson").classList.add("hidden");
+    const done = lessonOnDone;
+    lessonOnDone = null;
+    if (state.introduced) saveState();
+    overlayBusy = false;
+    if (done) done();
+    pumpNotices();
+    return;
+  }
+  overlayBusy = false;
+  pumpNotices();
+}
+
+function showModal({ title, body, html, onDismiss } = {}) {
+  overlayBusy = true;
+  clearTimeout(autoTimer);
+  haltMedia();
+  $("modal-title").textContent = title || "";
+  const box = $("modal-body");
+  box.innerHTML = "";
+  if (html) box.appendChild(html);
+  else {
+    const p = document.createElement("p");
+    p.textContent = body || "";
+    box.appendChild(p);
+  }
+  modalOnDismiss = onDismiss || null;
+  $("modal").classList.remove("hidden");
+}
+
+function showDailyReward() {
+  const g = pickGreeting(unlockedChars());
+  const wrap = document.createElement("div");
+  const intro = document.createElement("p");
+  intro.textContent = "Tagesziel geschafft! +50 XP. Hier ist ein Morse-Gruß für dich:";
+  const code = document.createElement("p");
+  code.className = "reward-code";
+  code.textContent = prettyCode(encodeWord(g.text));
+  const reveal = document.createElement("p");
+  reveal.hidden = true;
+  reveal.innerHTML = "<strong>" + escapeHtml(g.text) + "</strong> — " + escapeHtml(g.hint);
+  const actions = document.createElement("div");
+  actions.className = "reward-actions";
+  const play = document.createElement("button");
+  play.type = "button";
+  play.className = "btn btn-play";
+  play.textContent = "Abspielen";
+  play.addEventListener("click", () => playChar(g.text));
+  const solve = document.createElement("button");
+  solve.type = "button";
+  solve.className = "btn btn-ghost";
+  solve.textContent = "Auflösen";
+  solve.addEventListener("click", () => { reveal.hidden = false; solve.disabled = true; });
+  actions.append(play, solve);
+  wrap.append(intro, code, actions, reveal);
+  showModal({ title: "Tagesziel", html: wrap });
+}
+
+function encodeWord(text) {
+  return [...String(text).toUpperCase()].map((ch) => codeFor(ch) || "").filter(Boolean).join(" ");
+}
+
+function openLesson({ chars, title, lead, button, onDone } = {}) {
+  overlayBusy = true;
+  clearTimeout(autoTimer);
+  haltMedia();
+  lessonOnDone = onDone || null;
+  $("lesson-title").textContent = title || "Neues Zeichen";
+  $("lesson-lead").textContent = lead || "Tippe auf eine Karte, um den Ton zu hören.";
+  $("lesson-go").textContent = button || "Weiter";
+  const box = $("lesson-cards");
+  box.innerHTML = "";
+  box.classList.toggle("pair", (chars || []).length > 1);
+  for (const ch of chars || []) {
+    const card = document.createElement("button");
+    card.type = "button";
+    card.className = "lesson-char";
+    card.setAttribute("aria-label", ch + " abspielen");
+    const glyph = document.createElement("span");
+    glyph.className = "lesson-glyph";
+    glyph.textContent = ch;
+    const code = document.createElement("span");
+    code.className = "lesson-code";
+    code.textContent = prettyCode(codeFor(ch));
+    const mn = mnemonicFor(ch);
+    const word = document.createElement("span");
+    word.className = "lesson-mn";
+    word.textContent = mn ? "Merkwort: " + mn : "";
+    const hint = document.createElement("span");
+    hint.className = "lesson-play";
+    hint.textContent = "Tippen zum Anhören";
+    card.append(glyph, code, word, hint);
+    card.addEventListener("click", () => playChar(ch));
+    box.appendChild(card);
+  }
+  $("lesson").classList.remove("hidden");
+}
+
+function finishLesson() {
+  const chars = $$(".lesson-char .lesson-glyph").map((el) => el.textContent);
+  const seen = new Set(state.introduced || []);
+  for (const ch of chars) seen.add(ch);
+  state.introduced = KOCH_ORDER.filter((ch) => seen.has(ch));
+  state.introSeen = true;
+  saveState();
+  closeOverlays();
+}
+
 /* ---------- views ---------- */
 function showView(name) {
   view = name;
-  stopPlayback();
-  stopSidetone();
-  clearTimeout(autoTimer);
+  clearAdvance();
+  haltMedia();
   if (blitz && blitz.timer) {
     clearInterval(blitz.timer);
     blitz.timer = null;
@@ -277,9 +510,13 @@ function showView(name) {
 function renderHome() {
   rollDaily();
   const level = levelOf(state.xp);
-  $("stat-level").textContent = String(level);
-  $("stat-rank").textContent = rankOf(level);
-  $("stat-xp").textContent = String(state.xp);
+  const rank = rankOf(level);
+  const remain = xpToNextLevel(state.xp);
+  const nextRank = level < RANKS.length ? RANKS[level] : null;
+  const xpLine = $("xp-line");
+  xpLine.innerHTML = "<span><strong>" + state.xp + " XP</strong> · " + escapeHtml(rank) + "</span>" +
+    (nextRank ? '<span class="xp-next">noch ' + remain + " XP bis " + escapeHtml(nextRank) + "</span>" : "");
+
   $("stat-streak").textContent = String(state.streak);
   $("stat-unlocked").textContent = String(unlockedChars().length);
   $("daily-text").textContent = state.dailyCorrect + " / " + DAILY_GOAL;
@@ -287,38 +524,75 @@ function renderHome() {
   $("daily-box").classList.toggle("done", state.dailyCorrect >= DAILY_GOAL);
 
   const hint = $("next-hint");
+  const label = $("unlock-label");
+  const text = $("unlock-text");
+  const fill = $("unlock-fill");
   if (state.unlocked >= KOCH_ORDER.length) {
     hint.classList.remove("hidden");
-    hint.textContent = "Alle Koch-Zeichen sind offen. Weiter festigen!";
+    label.textContent = "Alle Zeichen offen";
+    text.textContent = "Weiter festigen!";
+    fill.style.width = "100%";
   } else {
     const { n, pct } = accuracy(state.history, HISTORY_WINDOW);
     const next = KOCH_ORDER[state.unlocked];
     hint.classList.remove("hidden");
+    label.textContent = "Nächstes Zeichen: " + next;
+    let ratio;
     if (n < MIN_KOCH) {
-      hint.textContent = "Noch " + (MIN_KOCH - n) + " Antworten, dann Prüfung auf das nächste Zeichen (" + next + ").";
+      ratio = n / MIN_KOCH;
+      text.textContent = n + " / " + MIN_KOCH + " Antworten";
     } else {
-      hint.textContent = Math.round(pct * 100) + " % der letzten " + n + ". Ab 90 % kommt " + next + " dazu.";
+      ratio = Math.min(1, pct / 0.9);
+      text.textContent = Math.round(pct * 100) + " % · ab 90 % kommt " + next;
     }
+    fill.style.width = Math.round(ratio * 100) + "%";
   }
 
+  const openCount = unlockedChars().length;
   const usable = wordsForUnlocked(unlockedChars());
-  const wordsBtn = $("mode-words");
-  if (usable.length < 3) {
-    wordsBtn.disabled = true;
-    $("words-sub").textContent = "Bald, sobald mehr Zeichen offen sind";
+  const needWords = minUnlockForWords(WORDS_MIN);
+
+  setModeLock($("mode-words"), usable.length < WORDS_MIN,
+    usable.length >= WORDS_MIN ? usable.length + " Wörter mit deinen Zeichen" : "ab " + needWords + " Zeichen",
+    $("words-sub"));
+
+  setModeLock($("mode-blitz"), openCount < BLITZ_MIN_CHARS,
+    openCount < BLITZ_MIN_CHARS ? "ab " + BLITZ_MIN_CHARS + " Zeichen" : "60 Sekunden, so viele wie möglich",
+    $("blitz-sub"));
+
+  const vibeBtn = $("mode-vibe");
+  if (!hasDeviceVibrate()) {
+    setModeLock(vibeBtn, true, "auf diesem Gerät nicht verfügbar", $("vibe-sub"));
   } else {
-    wordsBtn.disabled = false;
-    $("words-sub").textContent = usable.length + " Wörter mit deinen Zeichen";
+    setModeLock(vibeBtn, openCount < VIBE_MIN_CHARS,
+      openCount < VIBE_MIN_CHARS ? "ab " + VIBE_MIN_CHARS + " Zeichen" : "Vibration → raten",
+      $("vibe-sub"));
   }
+
+  const install = $("install-hint");
+  if (isStandalone()) {
+    install.classList.add("hidden");
+  } else {
+    install.classList.remove("hidden");
+    install.innerHTML = isAppleTouch()
+      ? "Tipp: <strong>Teilen → Zum Home-Bildschirm</strong> — dann geht’s auch offline."
+      : "Tipp: Im Chrome-Menü <strong>Zum Startbildschirm hinzufügen</strong> wählen – dann geht’s auch offline.";
+  }
+}
+
+function setModeLock(btn, locked, subtitle, subEl) {
+  btn.disabled = !!locked;
+  if (subEl) subEl.textContent = subtitle;
 }
 
 /* ---------- audio / haptic playback ---------- */
 function playChar(ch, { lamp, onEnd } = {}) {
   const tl = timelineFor(ch, settingsAudio());
+  const gen = playGen;
   if (lamp) {
     const start = performance.now();
     const tick = () => {
-      if (view !== "listen" && view !== "vibe" && view !== "blitz" && view !== "words" && view !== "cards") {
+      if (gen !== playGen) {
         lamp.classList.remove("on");
         return;
       }
@@ -330,7 +604,13 @@ function playChar(ch, { lamp, onEnd } = {}) {
     };
     requestAnimationFrame(tick);
   }
-  playTimeline(tl, { ...settingsAudio(), onEnd });
+  playTimeline(tl, {
+    ...settingsAudio(),
+    onEnd: () => {
+      if (gen !== playGen) return;
+      if (onEnd) onEnd();
+    },
+  });
   return tl.duration;
 }
 
@@ -345,6 +625,7 @@ function startQuiz(mode) {
   quiz = { mode, current: null, locked: false };
   $("quiz-title").textContent = mode === "vibe" ? "Fühlen" : "Hören";
   $("btn-play").textContent = mode === "vibe" ? "Fühlen" : "Abspielen";
+  $("btn-quiz-next").classList.add("hidden");
   updateComboUI("combo", "combo-n");
   nextQuiz(true);
 }
@@ -366,18 +647,22 @@ function nextQuiz(autoPlay) {
   quiz.locked = false;
   $("quiz-pattern").hidden = true;
   $("quiz-pattern").textContent = "";
+  $("quiz-compare").hidden = true;
+  $("quiz-compare").textContent = "";
   $("quiz-feedback").textContent = "";
   $("quiz-feedback").className = "feedback";
+  $("btn-quiz-next").classList.add("hidden");
   $("quiz-acc").textContent = accText();
   updateComboUI("combo", "combo-n");
   renderChoices($("choice-grid"), choiceSet(ch, unlocked, unlocked.length <= 8 ? unlocked.length : 8), onQuizChoice);
-  if (autoPlay && quiz.mode !== "vibe") setTimeout(() => triggerQuizPlay(), 180);
+  if (autoPlay && quiz.mode !== "vibe") scheduleAdvance(() => triggerQuizPlay(), 180);
 }
 
 function triggerQuizPlay() {
   if (!quiz || quiz.locked) return;
+  if (overlayOpen()) return;
   if (quiz.mode === "vibe") {
-    if (!navigator.vibrate) {
+    if (!hasDeviceVibrate()) {
       $("quiz-feedback").textContent = "Dieses Gerät gibt keine Vibration frei. Versuch’s unter Hören.";
       $("quiz-feedback").className = "feedback fail";
       return;
@@ -402,13 +687,29 @@ function onQuizChoice(ch, btn) {
     if (b.dataset.ch === quiz.current) b.classList.add("correct");
   });
   if (!ok) btn.classList.add("wrong");
-  $("quiz-pattern").hidden = false;
-  $("quiz-pattern").textContent = prettyCode(codeFor(quiz.current));
-  $("quiz-feedback").textContent = ok ? "Richtig!" : "Das war " + quiz.current;
-  $("quiz-feedback").className = "feedback " + (ok ? "ok" : "fail");
+  $("quiz-pattern").hidden = true;
+  if (ok) {
+    $("quiz-compare").hidden = true;
+    $("quiz-feedback").textContent = "Richtig!";
+    $("quiz-feedback").className = "feedback ok";
+    $("btn-quiz-next").classList.add("hidden");
+  } else {
+    $("quiz-compare").hidden = false;
+    $("quiz-compare").textContent = formatCompare(ch, quiz.current);
+    $("quiz-feedback").textContent = "Nochmal hören, dann Weiter.";
+    $("quiz-feedback").className = "feedback fail";
+    $("btn-quiz-next").classList.remove("hidden");
+  }
   cue(ok ? "ok" : "fail");
   recordAnswer(quiz.current, ok);
-  autoTimer = setTimeout(() => nextQuiz(true), ok ? 750 : 1300);
+  $("quiz-acc").textContent = accText();
+  if (ok) {
+    scheduleAdvance(() => nextQuiz(true), 750);
+  } else if (quiz.mode === "vibe") {
+    vibeChar(quiz.current);
+  } else {
+    playChar(quiz.current, { lamp: $("lamp") });
+  }
 }
 
 function renderChoices(grid, items, handler) {
@@ -426,9 +727,18 @@ function renderChoices(grid, items, handler) {
 
 /* ---------- send ---------- */
 function startSend() {
-  send = { current: null, marks: [], holding: false, start: 0, idle: null };
+  send = { current: null, marks: [], durations: [], holding: false, start: 0, idle: null, locked: false };
   bindKey();
+  syncEasySend();
   nextSend();
+}
+
+function syncEasySend() {
+  const easy = !!state.settings.easySend;
+  $("set-easy-send").checked = easy;
+  $("send-simple").classList.toggle("hidden", !easy);
+  $("btn-send-ok").classList.toggle("hidden", !easy);
+  $("send-basic").style.gridTemplateColumns = easy ? "1fr 1fr" : "1fr";
 }
 
 function nextSend() {
@@ -436,7 +746,9 @@ function nextSend() {
   const unlocked = unlockedChars();
   send.current = pickChar(unlocked, state.letterStats);
   send.marks = [];
+  send.durations = [];
   send.holding = false;
+  send.locked = false;
   $("send-letter").textContent = send.current;
   $("send-pattern").textContent = "";
   $("send-feedback").textContent = "";
@@ -447,60 +759,65 @@ function nextSend() {
   updateComboUI("send-combo", "send-combo-n");
 }
 
-function appendMark(mark) {
-  if (!send || !mark) return;
+function appendMark(mark, duration) {
+  if (!send || !mark || send.locked) return;
   send.marks.push(mark);
+  send.durations.push(Number(duration) || 0);
   $("send-pattern").textContent = prettyCode(send.marks.join(""));
   scheduleIdleCheck();
 }
 
 function scheduleIdleCheck() {
   clearTimeout(send.idle);
-  const wait = Math.max(650, ditDahThresholdMs(state.settings.wpm) * 2.2);
+  const wait = Math.max(800, currentSendThreshold() * 2.4);
   send.idle = setTimeout(() => {
-    if (send && send.marks.length && !send.holding) maybeAutoSubmit();
+    if (send && send.marks.length && !send.holding && !send.locked) submitSend();
   }, wait);
 }
 
-function maybeAutoSubmit() {
-  if (!send || !send.marks.length) return;
-  const got = send.marks.join("");
-  const expect = codeFor(send.current);
-  if (codesMatch(got, expect)) submitSend();
-}
-
 function submitSend() {
-  if (!send || !send.marks.length) return;
+  if (!send || !send.marks.length || send.locked) return;
   clearTimeout(send.idle);
+  send.locked = true;
   const got = send.marks.join("");
   const expect = codeFor(send.current);
   const ok = codesMatch(got, expect);
   $("send-feedback").textContent = ok
     ? "Sauber gegeben!"
-    : "Ziel: " + prettyCode(expect) + "  ·  du: " + prettyCode(got);
+    : formatCompareMarks(got, expect);
   $("send-feedback").className = "feedback " + (ok ? "ok" : "fail");
   cue(ok ? "ok" : "fail");
+  if (ok) {
+    state.tapStats = updateTapAverages(state.tapStats, send.durations, send.marks);
+  }
   recordAnswer(send.current, ok, { xp: 12 });
   const current = send.current;
   send.marks = [];
-  autoTimer = setTimeout(() => {
+  send.durations = [];
+  scheduleAdvance(() => {
     if (!ok) playChar(current);
     nextSend();
   }, ok ? 800 : 1400);
 }
 
+function formatCompareMarks(got, expect) {
+  return prettyCode(got) + "  ≠  " + prettyCode(expect);
+}
+
 function keyDown(ev) {
-  if (!send || send.holding) return;
+  if (!send || send.holding || send.locked) return;
   if (ev && ev.cancelable) ev.preventDefault();
+  clearTimeout(send.idle);
   send.holding = true;
   send.start = performance.now();
   $("morse-key").classList.add("down");
   $("key-cap").textContent = "·";
   startSidetone(state.settings.pitch, state.settings.volume);
+  const thr = currentSendThreshold();
   send.holdWatch = requestAnimationFrame(function watch() {
     if (!send || !send.holding) return;
     const d = performance.now() - send.start;
-    const dah = classifyPress(d, state.settings.wpm) === "-";
+    const dah = classifyPress(d, state.settings.sendWpm, thr) === "-";
     $("morse-key").classList.toggle("dah-hold", dah);
     $("key-cap").textContent = dah ? "–" : "·";
     send.holdWatch = requestAnimationFrame(watch);
@@ -514,9 +831,10 @@ function keyUp(ev) {
   cancelAnimationFrame(send.holdWatch);
   $("morse-key").classList.remove("down", "dah-hold");
   stopSidetone();
+  if (send.locked) return;
   const d = performance.now() - send.start;
-  const mark = classifyPress(d, state.settings.wpm);
-  if (mark) appendMark(mark);
+  const mark = classifyPress(d, state.settings.sendWpm, currentSendThreshold());
+  if (mark) appendMark(mark, d);
 }
 
 let keyBound = false;
@@ -559,7 +877,7 @@ function nextWord(autoPlay) {
   updateComboUI("words-combo", "words-combo-n");
   renderWordSlots();
   renderChoices($("word-grid"), unlockedChars(), onWordChoice);
-  if (autoPlay) setTimeout(() => playChar(pick.word, { lamp: null }), 200);
+  if (autoPlay) scheduleAdvance(() => playChar(pick.word, { lamp: null }), 200);
 }
 
 function renderWordSlots() {
@@ -593,13 +911,13 @@ function onWordChoice(ch) {
     $("word-feedback").className = "feedback ok";
     cue("ok");
     recordAnswer(target[target.length - 1], true, { xp: 16 });
-    autoTimer = setTimeout(() => nextWord(true), 900);
+    scheduleAdvance(() => nextWord(true), 900);
   }
 }
 
 /* ---------- blitz ---------- */
 function startBlitzIntro() {
-  blitz = { running: false, score: 0, time: 60, current: null, locked: false, timer: null, combo: 0 };
+  blitz = { running: false, score: 0, time: 60, current: null, locked: false, timer: null, combo: 0, fails: {} };
   $("blitz-play").classList.add("hidden");
   $("blitz-end").classList.add("hidden");
   $("blitz-intro").classList.remove("hidden");
@@ -609,9 +927,9 @@ function startBlitzIntro() {
 }
 
 function runBlitz() {
-  stopPlayback();
-  if (blitz.timer) clearInterval(blitz.timer);
-  blitz = { running: true, score: 0, time: 60, current: null, locked: false, timer: null, combo: 0 };
+  haltMedia();
+  if (blitz && blitz.timer) clearInterval(blitz.timer);
+  blitz = { running: true, score: 0, time: 60, current: null, locked: false, timer: null, combo: 0, fails: {} };
   combo = 0;
   $("blitz-intro").classList.add("hidden");
   $("blitz-end").classList.add("hidden");
@@ -621,6 +939,8 @@ function runBlitz() {
   cue("blitz");
   nextBlitz(true);
   blitz.timer = setInterval(() => {
+    if (!blitz || !blitz.running) return;
+    if (overlayOpen()) return;
     blitz.time -= 1;
     $("blitz-time").textContent = String(blitz.time);
     if (blitz.time <= 0) endBlitz();
@@ -634,10 +954,12 @@ function nextBlitz(autoPlay) {
   blitz.locked = false;
   $("blitz-feedback").textContent = "";
   $("blitz-feedback").className = "feedback";
+  $("blitz-compare").hidden = true;
+  $("blitz-compare").textContent = "";
   updateComboUI("blitz-combo", "blitz-combo-n");
   renderChoices($("blitz-grid"), choiceSet(blitz.current, unlocked, Math.min(8, unlocked.length)), onBlitzChoice);
-  if (autoPlay) setTimeout(() => {
-    if (blitz && blitz.running) playChar(blitz.current, { lamp: $("blitz-lamp") });
+  if (autoPlay) scheduleAdvance(() => {
+    if (blitz && blitz.running && !overlayOpen()) playChar(blitz.current, { lamp: $("blitz-lamp") });
   }, 120);
 }
 
@@ -650,6 +972,7 @@ function onBlitzChoice(ch, btn) {
     combo = blitz.combo;
     const gain = 10 + Math.min(20, (blitz.combo - 1) * 2);
     blitz.score += gain;
+    $("blitz-compare").hidden = true;
     $("blitz-feedback").textContent = "+" + gain;
     $("blitz-feedback").className = "feedback ok";
     cue("ok");
@@ -657,13 +980,16 @@ function onBlitzChoice(ch, btn) {
   } else {
     blitz.combo = 0;
     combo = 0;
+    blitz.fails[blitz.current] = (blitz.fails[blitz.current] || 0) + 1;
+    $("blitz-compare").hidden = false;
+    $("blitz-compare").textContent = formatCompare(ch, blitz.current);
     $("blitz-feedback").textContent = "War " + blitz.current;
     $("blitz-feedback").className = "feedback fail";
     cue("fail");
     recordAnswer(blitz.current, false, { xp: 0, skipUnlock: true });
   }
   $("blitz-score").textContent = String(blitz.score);
-  autoTimer = setTimeout(() => nextBlitz(true), ok ? 280 : 600);
+  scheduleAdvance(() => nextBlitz(true), ok ? 280 : 700);
 }
 
 function endBlitz() {
@@ -671,12 +997,13 @@ function endBlitz() {
   blitz.running = false;
   clearInterval(blitz.timer);
   blitz.timer = null;
-  stopPlayback();
+  haltMedia();
   $("blitz-play").classList.add("hidden");
   $("blitz-end").classList.remove("hidden");
   $("blitz-final").textContent = String(blitz.score);
+  const prevBest = state.bestBlitz;
   let msg = "Zeit um!";
-  if (blitz.score > state.bestBlitz) {
+  if (blitz.score > prevBest) {
     state.bestBlitz = blitz.score;
     saveState();
     msg = "Neue Bestleistung!";
@@ -686,7 +1013,31 @@ function endBlitz() {
   } else {
     addXp(Math.floor(blitz.score / 4));
   }
-  $("blitz-end-msg").textContent = msg + (state.bestBlitz ? "  Bestleistung: " + state.bestBlitz : "");
+  $("blitz-end-msg").textContent = msg;
+  const delta = $("blitz-delta");
+  if (blitz.score > prevBest) {
+    const gain = blitz.score - prevBest;
+    delta.textContent = prevBest ? "Bestleistung +" + gain : "Erste Bestleistung";
+    delta.hidden = false;
+  } else if (prevBest) {
+    const behind = prevBest - blitz.score;
+    delta.textContent = behind ? behind + " unter der Bestleistung (" + prevBest + ")" : "Gleichauf mit der Bestleistung";
+    delta.hidden = false;
+  } else {
+    delta.textContent = "";
+    delta.hidden = true;
+  }
+  const weakEl = $("blitz-weak");
+  const sessionFails = Object.keys(blitz.fails || {});
+  let weak = null;
+  if (sessionFails.length) {
+    weak = sessionFails.sort((a, b) => (blitz.fails[b] - blitz.fails[a]) || a.localeCompare(b))[0];
+  } else {
+    weak = weakestChar(state.letterStats, unlockedChars());
+  }
+  if (weak && sessionFails.length) weakEl.textContent = "Übe noch: " + weak;
+  else if (weak) weakEl.textContent = "Zum Festigen: " + weak;
+  else weakEl.textContent = "Kein schwaches Zeichen diesmal.";
   maybeUnlock();
 }
 
@@ -708,8 +1059,16 @@ function renderCards() {
   for (const ch of list) {
     const code = codeFor(ch);
     if (!code) continue;
+    const unlocked = open.has(ch);
     const row = document.createElement("div");
-    row.className = "morse-row" + (open.has(ch) ? "" : " locked");
+    row.className = "morse-row " + (unlocked ? "open" : "locked");
+    if (!unlocked) {
+      row.innerHTML =
+        '<div class="morse-glyph">?</div>' +
+        '<div class="morse-meta"><div class="morse-mn">Noch gesperrt</div></div>';
+      box.appendChild(row);
+      continue;
+    }
     const mn = mnemonicFor(ch);
     const label = displayName(ch);
     row.innerHTML =
@@ -741,6 +1100,8 @@ function renderSettings() {
   const s = state.settings;
   $("set-wpm").value = String(s.wpm);
   $("val-wpm").textContent = String(s.wpm);
+  $("set-send-wpm").value = String(s.sendWpm);
+  $("val-send-wpm").textContent = String(s.sendWpm);
   $("set-farnsworth").checked = !!s.farnsworth;
   $("set-pitch").value = String(s.pitch);
   $("val-pitch").textContent = String(s.pitch);
@@ -754,6 +1115,11 @@ function bindSettings() {
   $("set-wpm").addEventListener("input", (e) => {
     state.settings.wpm = Number(e.target.value);
     $("val-wpm").textContent = String(state.settings.wpm);
+    saveState();
+  });
+  $("set-send-wpm").addEventListener("input", (e) => {
+    state.settings.sendWpm = Number(e.target.value);
+    $("val-send-wpm").textContent = String(state.settings.sendWpm);
     saveState();
   });
   $("set-farnsworth").addEventListener("change", (e) => {
@@ -792,6 +1158,8 @@ function bindSettings() {
     saveState();
     toast("Fortschritt zurückgesetzt.");
     renderSettings();
+    showView("home");
+    openFirstLesson();
   });
 }
 
@@ -802,16 +1170,6 @@ function toast(msg) {
   el.hidden = false;
   clearTimeout(toast._t);
   toast._t = setTimeout(() => { el.hidden = true; }, 2400);
-}
-
-function showModal(title, body) {
-  $("modal-title").textContent = title;
-  $("modal-body").textContent = body;
-  $("modal").classList.remove("hidden");
-}
-
-function hideModal() {
-  $("modal").classList.add("hidden");
 }
 
 function confettiBurst(n = 60) {
@@ -857,9 +1215,22 @@ function confettiBurst(n = 60) {
 }
 
 /* ---------- init ---------- */
+function openFirstLesson() {
+  openLesson({
+    chars: ["E", "T"],
+    title: "Deine ersten Zeichen",
+    lead: "Tippe auf eine Karte, um den Ton zu hören. Das sind Dit und Dah – die Bausteine von allem.",
+    button: "Jetzt hören",
+    onDone: () => showView("listen"),
+  });
+}
+
 async function enter() {
   try {
-    await unlockAudio();
+    await Promise.race([
+      unlockAudio(),
+      new Promise((resolve) => setTimeout(resolve, 800)),
+    ]);
   } catch {
     /* Audio may still start on later taps */
   }
@@ -868,11 +1239,17 @@ async function enter() {
   }
   $("gate").classList.add("hidden");
   $("app").classList.remove("hidden");
-  showView("home");
+  if (!state.introSeen) {
+    renderHome();
+    openFirstLesson();
+  } else {
+    showView("home");
+  }
 }
 
 function bindUI() {
   $("btn-enter").addEventListener("click", enter);
+  $("btn-continue").addEventListener("click", () => showView("listen"));
   $$(".mode-card").forEach((btn) => {
     btn.addEventListener("click", () => {
       if (btn.disabled) return;
@@ -882,15 +1259,23 @@ function bindUI() {
   $$("[data-go]").forEach((btn) => btn.addEventListener("click", () => showView(btn.dataset.go)));
   $("btn-settings").addEventListener("click", () => showView("settings"));
   $("btn-play").addEventListener("click", triggerQuizPlay);
-  $("btn-dit").addEventListener("click", () => appendMark("."));
-  $("btn-dah").addEventListener("click", () => appendMark("-"));
+  $("btn-quiz-next").addEventListener("click", () => nextQuiz(true));
+  $("btn-dit").addEventListener("click", () => appendMark(".", 0));
+  $("btn-dah").addEventListener("click", () => appendMark("-", 0));
   $("btn-clear").addEventListener("click", () => {
-    if (!send) return;
+    if (!send || send.locked) return;
+    clearTimeout(send.idle);
     send.marks = [];
+    send.durations = [];
     $("send-pattern").textContent = "";
     $("send-feedback").textContent = "";
   });
   $("btn-send-ok").addEventListener("click", submitSend);
+  $("set-easy-send").addEventListener("change", (e) => {
+    state.settings.easySend = e.target.checked;
+    saveState();
+    syncEasySend();
+  });
   $("btn-play-word").addEventListener("click", () => {
     if (words && words.current) playChar(words.current.word);
   });
@@ -911,15 +1296,24 @@ function bindUI() {
       renderCards();
     });
   });
-  $("modal-ok").addEventListener("click", hideModal);
-  $("modal").addEventListener("click", (e) => {
-    if (e.target.id === "modal") hideModal();
+  $("modal-ok").addEventListener("click", () => {
+    $("modal").classList.add("hidden");
+    const done = modalOnDismiss;
+    modalOnDismiss = null;
+    overlayBusy = false;
+    if (done) done();
+    pumpNotices();
   });
+  $("modal").addEventListener("click", (e) => {
+    if (e.target.id === "modal") $("modal-ok").click();
+  });
+  $("lesson-go").addEventListener("click", finishLesson);
   bindSettings();
 }
 
 function registerSW() {
   if (!("serviceWorker" in navigator)) return;
+  if (new URLSearchParams(location.search).has("e2e")) return;
   window.addEventListener("load", () => {
     navigator.serviceWorker.register("./sw.js").catch(() => { /* offline first later */ });
   });
@@ -928,3 +1322,17 @@ function registerSW() {
 bindUI();
 registerSW();
 rollDaily();
+
+if (new URLSearchParams(location.search).has("e2e")) {
+  window.__morse = {
+    getState: () => state,
+    enqueueNotice,
+    overlayOpen,
+    haltMedia,
+    playGen: () => playGen,
+    pendingAdvance: () => pendingAdvance,
+    quizCurrent: () => quiz && quiz.current,
+    showView,
+    enter,
+  };
+}

@@ -1,4 +1,4 @@
-const VERSION = "morse-trainer-v1";
+const VERSION = "morse-trainer-v2";
 const ASSETS = [
   "./",
   "./index.html",

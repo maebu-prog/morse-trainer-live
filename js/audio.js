@@ -16,7 +16,12 @@ export function unlockAudio() {
     master.gain.value = 1;
     master.connect(ctx.destination);
   }
-  if (ctx.state === "suspended") return ctx.resume();
+  if (ctx.state === "suspended") {
+    return Promise.race([
+      ctx.resume(),
+      new Promise((resolve) => setTimeout(resolve, 700)),
+    ]);
+  }
   return Promise.resolve();
 }
 
