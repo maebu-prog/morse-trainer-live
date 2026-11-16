@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1" />
+  <meta name="theme-color" content="#070b14" />
+  <meta name="color-scheme" content="dark" />
+  <meta name="description" content="Morse Trainer – Morsecode hören, selbst geben und fühlen. Sofort loslegen, ohne Anmeldung." />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Morse" />
+  <title>Morse Trainer</title>
+  <link rel="manifest" href="./manifest.webmanifest" />
+  <link rel="icon" type="image/png" sizes="32x32" href="./icons/favicon-32.png" />
+  <link rel="icon" type="image/png" sizes="192x192" href="./icons/icon-192.png" />
+  <link rel="apple-touch-icon" href="./icons/apple-touch-icon.png" />
+  <link rel="stylesheet" href="./css/app.css" />
+</head>
+<body>
+  <canvas id="confetti" aria-hidden="true"></canvas>
+
+  <div id="gate" class="gate">
+    <div class="gate-card">
+      <div class="logo-mark" aria-hidden="true">
+        <span class="dit"></span><span class="dah"></span>
+      </div>
+      <h1>Morse Trainer</h1>
+      <p>Hören, selbst morsen und auf dem Handy fühlen. Tippe, damit Ton und Vibration laufen dürfen.</p>
+      <button type="button" class="btn btn-primary" id="btn-enter">Los geht’s</button>
+    </div>
+  </div>
+
+  <div id="app" class="app hidden">
+    <!-- HOME -->
+    <section id="view-home" class="view">
+      <header class="hero">
+        <div class="hero-top">
+          <div class="logo-mark sm" aria-hidden="true"><span class="dit"></span><span class="dah"></span></div>
+          <button type="button" class="btn-icon" id="btn-settings" aria-label="Einstellungen">⚙</button>
+        </div>
+        <h1>Morse Trainer</h1>
+        <p class="lead">Koch-Methode: erst zwei Zeichen, bei 90&nbsp;% kommt das nächste dazu.</p>
+      </header>
+
+      <div class="hud">
+        <div class="stat">
+          <span class="stat-num" id="stat-level">1</span>
+          <span class="stat-label" id="stat-rank">Horcher</span>
+        </div>
+        <div class="stat">
+          <span class="stat-num" id="stat-xp">0</span>
+          <span class="stat-label">XP</span>
+        </div>
+        <div class="stat">
+          <span class="stat-num" id="stat-streak">0</span>
+          <span class="stat-label">Serie</span>
+        </div>
+        <div class="stat">
+          <span class="stat-num" id="stat-unlocked">2</span>
+          <span class="stat-label">Zeichen</span>
+        </div>
+      </div>
+
+      <div class="daily" id="daily-box">
+        <div class="daily-row">
+          <span>Tagesziel</span>
+          <span id="daily-text">0 / 20</span>
+        </div>
+        <div class="bar"><div class="bar-fill" id="daily-fill"></div></div>
+      </div>
+
+      <div class="unlock-chip hidden" id="next-hint"></div>
+
+      <nav class="modes" aria-label="Übungsarten">
+        <button type="button" class="mode-card" data-mode="listen">
+          <span class="mode-ico" aria-hidden="true">🎧</span>
+          <span class="mode-title">Hören</span>
+          <span class="mode-sub">Ton → Buchstabe</span>
+        </button>
+        <button type="button" class="mode-card" data-mode="send">
+          <span class="mode-ico" aria-hidden="true">☝️</span>
+          <span class="mode-title">Morsen</span>
+          <span class="mode-sub">Buchstabe → Taste</span>
+        </button>
+        <button type="button" class="mode-card" data-mode="vibe">
+          <span class="mode-ico" aria-hidden="true">📳</span>
+          <span class="mode-title">Fühlen</span>
+          <span class="mode-sub">Vibration → raten</span>
+        </button>
+        <button type="button" class="mode-card" data-mode="words" id="mode-words">
+          <span class="mode-ico" aria-hidden="true">💬</span>
+          <span class="mode-title">Wörter</span>
+          <span class="mode-sub" id="words-sub">Kurze deutsche Wörter</span>
+        </button>
+        <button type="button" class="mode-card mode-wide" data-mode="blitz">
+          <span class="mode-ico" aria-hidden="true">⚡</span>
+          <span class="mode-title">Blitz</span>
+          <span class="mode-sub">60 Sekunden, so viele wie möglich</span>
+        </button>
+        <button type="button" class="mode-card mode-wide" data-mode="cards">
+          <span class="mode-ico" aria-hidden="true">🗂</span>
+          <span class="mode-title">Lernkarten</span>
+          <span class="mode-sub">Alphabet, Zahlen, Satzzeichen</span>
+        </button>
+      </nav>
+
+      <p class="install-hint" id="install-hint">Tipp: Im Chrome-Menü <strong>Zum Startbildschirm hinzufügen</strong> wählen – dann geht’s auch offline.</p>
+    </section>
+
+    <!-- LISTEN / VIBE (shared shell, swapped by JS) -->
+    <section id="view-quiz" class="view hidden">
+      <header class="topbar">
+        <button type="button" class="btn-icon back" data-go="home" aria-label="Zurück">←</button>
+        <div class="topbar-mid">
+          <h2 id="quiz-title">Hören</h2>
+          <p class="topbar-sub" id="quiz-acc">–</p>
+        </div>
+        <div class="combo" id="combo" hidden>Combo <span id="combo-n">0</span></div>
+      </header>
+
+      <div class="prompt-stage">
+        <div class="lamp" id="lamp" aria-hidden="true"></div>
+        <button type="button" class="btn btn-play" id="btn-play">Abspielen</button>
+        <p class="pattern" id="quiz-pattern" hidden></p>
+        <p class="feedback" id="quiz-feedback" role="status"></p>
+      </div>
+
+      <div class="choice-grid" id="choice-grid"></div>
+    </section>
+
+    <!-- SEND -->
+    <section id="view-send" class="view hidden">
+      <header class="topbar">
+        <button type="button" class="btn-icon back" data-go="home" aria-label="Zurück">←</button>
+        <div class="topbar-mid">
+          <h2>Morsen</h2>
+          <p class="topbar-sub" id="send-acc">–</p>
+        </div>
+        <div class="combo" id="send-combo" hidden>Combo <span id="send-combo-n">0</span></div>
+      </header>
+
+      <div class="send-stage">
+        <p class="prompt-letter" id="send-letter">E</p>
+        <p class="pattern input-pattern" id="send-pattern" aria-live="polite"></p>
+        <p class="feedback" id="send-feedback" role="status"></p>
+      </div>
+
+      <button type="button" class="morse-key" id="morse-key" aria-label="Morse-Taste, kurz für Dit, lang für Dah">
+        <span class="key-cap" id="key-cap">•  /  –</span>
+        <span class="key-hint" id="key-hint">kurz = Dit, lang = Dah</span>
+      </button>
+
+      <div class="key-alts">
+        <button type="button" class="btn btn-ghost" id="btn-dit" aria-label="Dit">• Dit</button>
+        <button type="button" class="btn btn-ghost" id="btn-dah" aria-label="Dah">– Dah</button>
+        <button type="button" class="btn btn-ghost" id="btn-clear">Löschen</button>
+        <button type="button" class="btn btn-primary" id="btn-send-ok">Fertig</button>
+      </div>
+    </section>
+
+    <!-- WORDS -->
+    <section id="view-words" class="view hidden">
+      <header class="topbar">
+        <button type="button" class="btn-icon back" data-go="home" aria-label="Zurück">←</button>
+        <div class="topbar-mid">
+          <h2>Wörter</h2>
+          <p class="topbar-sub" id="words-acc">–</p>
+        </div>
+        <div class="combo" id="words-combo" hidden>Combo <span id="words-combo-n">0</span></div>
+      </header>
+
+      <div class="prompt-stage">
+        <p class="word-hint" id="word-hint"></p>
+        <div class="word-slots" id="word-slots"></div>
+        <button type="button" class="btn btn-play" id="btn-play-word">Wort abspielen</button>
+        <p class="feedback" id="word-feedback" role="status"></p>
+      </div>
+
+      <div class="choice-grid" id="word-grid"></div>
+      <div class="key-alts">
+        <button type="button" class="btn btn-ghost" id="btn-word-clear">Löschen</button>
+        <button type="button" class="btn btn-ghost" id="btn-word-skip">Neues Wort</button>
+      </div>
+    </section>
+
+    <!-- BLITZ -->
+    <section id="view-blitz" class="view hidden">
+      <header class="topbar">
+        <button type="button" class="btn-icon back" data-go="home" aria-label="Zurück">←</button>
+        <div class="topbar-mid">
+          <h2>Blitz</h2>
+          <p class="topbar-sub"><span id="blitz-time">60</span>s · <span id="blitz-score">0</span> Punkte</p>
+        </div>
+        <div class="combo" id="blitz-combo" hidden>Combo <span id="blitz-combo-n">0</span></div>
+      </header>
+
+      <div id="blitz-play">
+        <div class="prompt-stage">
+          <div class="lamp" id="blitz-lamp" aria-hidden="true"></div>
+          <button type="button" class="btn btn-play" id="btn-play-blitz">Abspielen</button>
+          <p class="feedback" id="blitz-feedback" role="status"></p>
+        </div>
+        <div class="choice-grid" id="blitz-grid"></div>
+      </div>
+
+      <div id="blitz-intro" class="blitz-panel">
+        <p>60 Sekunden, nur geöffnete Zeichen. Jeder Treffer zählt, Combos bringen Extra-Punkte.</p>
+        <p class="muted">Bestleistung: <strong id="blitz-best">0</strong></p>
+        <button type="button" class="btn btn-primary" id="btn-blitz-start">Start</button>
+      </div>
+
+      <div id="blitz-end" class="blitz-panel hidden">
+        <p class="blitz-final" id="blitz-final">0</p>
+        <p id="blitz-end-msg">Zeit um!</p>
+        <button type="button" class="btn btn-primary" id="btn-blitz-again">Noch einmal</button>
+        <button type="button" class="btn btn-ghost" data-go="home">Zur Startseite</button>
+      </div>
+    </section>
+
+    <!-- CARDS -->
+    <section id="view-cards" class="view hidden">
+      <header class="topbar">
+        <button type="button" class="btn-icon back" data-go="home" aria-label="Zurück">←</button>
+        <div class="topbar-mid">
+          <h2>Lernkarten</h2>
+          <p class="topbar-sub">ITU-Morse, mit Merkwort wo üblich</p>
+        </div>
+      </header>
+
+      <div class="filters" role="tablist" aria-label="Filter">
+        <button type="button" class="chip on" data-filter="letters">A–Z</button>
+        <button type="button" class="chip" data-filter="digits">0–9</button>
+        <button type="button" class="chip" data-filter="punct">Satzzeichen</button>
+        <button type="button" class="chip" data-filter="umlauts">Ä Ö Ü</button>
+        <button type="button" class="chip" data-filter="all">Alle</button>
+      </div>
+
+      <div class="card-list" id="card-list"></div>
+    </section>
+
+    <!-- SETTINGS -->
+    <section id="view-settings" class="view hidden">
+      <header class="topbar">
+        <button type="button" class="btn-icon back" data-go="home" aria-label="Zurück">←</button>
+        <div class="topbar-mid">
+          <h2>Einstellungen</h2>
+          <p class="topbar-sub">Ton, Tempo, Fortschritt</p>
+        </div>
+      </header>
+
+      <form class="settings" id="settings-form">
+        <label class="setting">
+          <span>Geschwindigkeit <strong id="val-wpm">15</strong> WPM</span>
+          <input type="range" id="set-wpm" min="10" max="25" step="1" value="15" />
+        </label>
+
+        <label class="setting toggle">
+          <span>Farnsworth-Abstand <small>Zeichen schnell, Pausen etwas länger – angenehmer zum Lernen</small></span>
+          <input type="checkbox" id="set-farnsworth" checked />
+        </label>
+
+        <label class="setting">
+          <span>Tonhöhe <strong id="val-pitch">600</strong> Hz</span>
+          <input type="range" id="set-pitch" min="400" max="900" step="10" value="600" />
+        </label>
+
+        <label class="setting">
+          <span>Lautstärke <strong id="val-volume">70</strong>%</span>
+          <input type="range" id="set-volume" min="0" max="100" step="5" value="70" />
+        </label>
+
+        <label class="setting toggle">
+          <span>Vibration <small>Zum Fühlen und als kurzes Feedback</small></span>
+          <input type="checkbox" id="set-vibration" checked />
+        </label>
+
+        <label class="setting toggle">
+          <span>Effekt-Töne</span>
+          <input type="checkbox" id="set-sfx" checked />
+        </label>
+
+        <button type="button" class="btn btn-ghost" id="btn-preview">Testton abspielen</button>
+        <button type="button" class="btn btn-danger" id="btn-reset">Fortschritt zurücksetzen</button>
+      </form>
+    </section>
+  </div>
+
+  <div id="toast" class="toast" hidden role="status"></div>
+  <div id="modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+    <div class="modal-card">
+      <h3 id="modal-title"></h3>
+      <p id="modal-body"></p>
+      <button type="button" class="btn btn-primary" id="modal-ok">Weiter</button>
+    </div>
+  </div>
+
+  <script type="module" src="./js/app.js"></script>
+</body>
+</html>
